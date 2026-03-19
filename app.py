@@ -26,7 +26,7 @@ def gerar_pdf_termico(pdf_bytes):
     c.showPage()
 
     # --- PÁGINA 2: DECLARAÇÃO DE CONTEÚDO ---
-    c.setFont("Helvetica-Bold", 10)
+    c.setFont("Helvetica-Bold", 8)
     c.drawCentredString(50*mm, 142*mm, "D E C L A R A Ç Ã O   D E   C O N T E Ú D O")
     c.setLineWidth(0.2)
     c.line(5*mm, 138*mm, 95*mm, 138*mm)
