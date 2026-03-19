@@ -4,66 +4,112 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from PIL import Image
 import io
+import json
+import google.generativeai as genai
 
-st.set_page_config(page_title="Conversor de Etiquetas 100x150", layout="centered")
+# Configuração da API do Gemini (Pegue da variável de ambiente no Streamlit)
+try:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+except:
+    st.error("Configure a variável GEMINI_API_KEY no painel do Streamlit!")
 
-def gerar_pdf_termico(pdf_bytes):
-    doc_original = fitz.open(stream=pdf_bytes, filetype="pdf")
-    output_pdf = io.BytesIO()
-    
-    # Criando PDF 100x150mm
-    c = canvas.Canvas(output_pdf, pagesize=(100*mm, 150*mm))
+st.set_page_config(page_title="Conversor Térmico 3D", page_icon="📦")
 
-    # --- PÁGINA 1: ETIQUETA DE ENVIO ---
-    page1 = doc_original[0]
-    pix = page1.get_pixmap(matrix=fitz.Matrix(3, 3)) # 300 DPI aprox.
+def extrair_dados_gemini(pdf_bytes):
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    # Envia o PDF para o Gemini extrair os dados JSON
+    response = model.generate_content([
+        {"mime_type": "application/pdf", "data": pdf_bytes},
+        "Extraia os dados desta Declaração de Conteúdo. Retorne APENAS um JSON válido: "
+        "{'sender': {'name': 'string', 'address': 'string', 'city': 'string', 'state': 'string', 'zip': 'string', 'doc': 'string'}, "
+        "'recipient': {'name': 'string', 'address': 'string', 'city': 'string', 'state': 'string', 'zip': 'string', 'doc': 'string'}, "
+        "'items': [{'description': 'string', 'quantity': int, 'value': float}], 'totalValue': float}"
+    ])
+    # Limpeza básica de markdown caso o Gemini envie
+    clean_json = response.text.replace("```json", "").replace("```", "").strip()
+    return json.loads(clean_json)
+
+def gerar_pdf_unificado(original_bytes, dados_ai):
+    doc_orig = fitz.open(stream=original_bytes, filetype="pdf")
+    output = io.BytesIO()
+    c = canvas.Canvas(output, pagesize=(100*mm, 150*mm))
+
+    # --- PÁGINA 1: ETIQUETA (Com Auto-Crop inteligente) ---
+    page1 = doc_orig[0]
+    pix = page1.get_pixmap(matrix=fitz.Matrix(3, 3))
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     
-    # CONVERSÃO PARA O REPORTLAB ENTENDER (A "Luva de Transição")
-    img_pil = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    # Auto-crop simplificado (detecta área não branca)
+    bbox = img.getbbox()
+    if bbox:
+        img = img.crop(bbox)
     
-    # Desenha a etiqueta
-    c.drawInlineImage(img_pil, 2*mm, 2*mm, width=96*mm, height=146*mm, preserveAspectRatio=True)
+    c.drawImage(img, 2*mm, 2*mm, width=96*mm, height=146*mm, preserveAspectRatio=True)
     c.showPage()
 
-    # --- PÁGINA 2: DECLARAÇÃO DE CONTEÚDO ---
-    c.setFont("Helvetica-Bold", 8)
-    c.drawCentredString(50*mm, 142*mm, "D E C L A R A Ç Ã O   D E   C O N T E Ú D O")
+    # --- PÁGINA 2: DECLARAÇÃO (Reconstruída do JSON) ---
+    c.setFont("Helvetica-Bold", 10)
+    c.drawCentredString(50*mm, 142*mm, "DECLARAÇÃO DE CONTEÚDO")
+    
+    # Quadros de Remetente/Destinatário
     c.setLineWidth(0.2)
-    c.line(5*mm, 138*mm, 95*mm, 138*mm)
-
-    # Texto Fixo da Declaração (Conforme seus ajustes anteriores)
+    c.rect(5*mm, 95*mm, 90*mm, 42*mm) # Moldura superior
+    
+    y = 132*mm
+    c.setFont("Helvetica-Bold", 8)
+    c.drawString(7*mm, y, "REMETENTE:")
     c.setFont("Helvetica", 7)
-    y_decl = 35*mm
-    decl_linhas = [
-        "Declaro que não me enquadro no conceito de contribuinte previsto no art. 4º da LC 87/96,",
-        "uma vez que não realizo operações de circulação de mercadoria com intuito comercial.",
-        "Declaro ainda que não estou postando conteúdo inflamável ou perigoso (Lei 6.538/78)."
-    ]
-    for linha in decl_linhas:
-        c.drawString(5*mm, y_decl, linha)
-        y_decl -= 4*mm
+    c.drawString(7*mm, y-4*mm, f"Nome: {dados_ai['sender']['name']}")
+    c.drawString(7*mm, y-8*mm, f"Doc: {dados_ai['sender']['doc']}")
+    c.drawString(7*mm, y-12*mm, f"End: {dados_ai['sender']['address'][:50]}")
+    
+    y = 112*mm
+    c.setFont("Helvetica-Bold", 8)
+    c.drawString(7*mm, y, "DESTINATÁRIO:")
+    c.setFont("Helvetica", 7)
+    c.drawString(7*mm, y-4*mm, f"Nome: {dados_ai['recipient']['name']}")
+    c.drawString(7*mm, y-8*mm, f"End: {dados_ai['recipient']['address'][:50]}")
 
-    # Assinatura
-    c.line(25*mm, 18*mm, 75*mm, 18*mm)
+    # Tabela de Itens
+    c.rect(5*mm, 45*mm, 90*mm, 48*mm) # Moldura itens
+    c.setFont("Helvetica-Bold", 7)
+    c.drawString(7*mm, 90*mm, "DESCRIÇÃO")
+    c.drawRightString(93*mm, 90*mm, "VALOR")
+    
+    y_item = 85*mm
+    c.setFont("Helvetica", 7)
+    for item in dados_ai['items'][:5]: # Limite de 5 itens para caber na etiqueta
+        desc = item['description'][:40]
+        c.drawString(7*mm, y_item, f"{item['quantity']}x {desc}")
+        c.drawRightString(93*mm, y_item, f"R$ {item['value']:.2f}")
+        y_item -= 5*mm
+
+    c.setFont("Helvetica-Bold", 8)
+    c.drawRightString(93*mm, 48*mm, f"TOTAL: R$ {dados_ai['totalValue']:.2f}")
+
+    # Termos Legais e Assinatura (Conforme seu código React)
     c.setFont("Helvetica", 6)
+    c.drawCentredString(50*mm, 30*mm, "Declaro que não me enquadro no conceito de contribuinte previsto na LC 87/96.")
+    c.line(25*mm, 18*mm, 75*mm, 18*mm)
     c.drawCentredString(50*mm, 15*mm, "Assinatura do Declarante/Remetente")
-
-    # Observação Final (3mm abaixo da assinatura)
-    c.setFont("Helvetica-Oblique", 6)
-    c.drawString(5*mm, 8*mm, "OBSERVAÇÃO: Constitui crime contra a ordem tributária suprimir ou reduzir tributo,")
-    c.drawString(5*mm, 5*mm, "ou contribuição social e qualquer acessório (Lei 8.137/90 Art. 1º, V).")
-
+    
     c.save()
-    return output_pdf.getvalue()
+    return output.getvalue()
 
-st.title("📦 Etiqueta Térmica 100x150")
-uploaded_file = st.file_uploader("Arraste o PDF original aqui", type="pdf")
+# Interface Streamlit (Visual "Clean")
+st.title("📦 Conversor Térmico")
+st.caption("Gera Etiquetas 100x150mm com IA")
 
-if uploaded_file:
-    if st.button("Gerar PDF Unificado"):
-        try:
-            pdf_final = gerar_pdf_termico(uploaded_file.read())
-            st.success("Sucesso!")
-            st.download_button("📥 Baixar Etiqueta Final", pdf_final, "etiqueta.pdf", "application/pdf")
-        except Exception as e:
-            st.error(f"Erro técnico: {e}")
+file = st.file_uploader("Arraste o PDF de envio aqui", type="pdf")
+
+if file:
+    pdf_bytes = file.read()
+    if st.button("🚀 Processar com Gemini e Gerar PDF", use_container_width=True):
+        with st.spinner("IA extraindo dados e ajustando layout..."):
+            try:
+                dados = extrair_dados_gemini(pdf_bytes)
+                pdf_final = gerar_pdf_unificado(pdf_bytes, dados)
+                st.success("Tudo pronto!")
+                st.download_button("📥 Baixar PDF Térmico", pdf_final, "etiqueta_100x150.pdf", "application/pdf", use_container_width=True)
+            except Exception as e:
+                st.error(f"Erro no processamento: {e}")
